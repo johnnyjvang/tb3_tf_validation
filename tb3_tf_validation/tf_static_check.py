@@ -13,9 +13,7 @@ For each static transform, sample multiple times and verify:
 - translation remains constant
 - rotation remains constant
 
-Notes:
-- Small floating point noise is tolerated
-- This helps catch bad URDF/static TF configuration
+Writes one summary row to the shared TF validation CSV.
 """
 
 import math
@@ -26,6 +24,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+
+from tb3_tf_validation.result_utils import append_result
 
 
 class TFStaticCheck(Node):
@@ -122,8 +122,17 @@ class TFStaticCheck(Node):
 
         if not self.transform_pairs:
             self.get_logger().error('[FAIL] No static TF pairs available to check.')
+            append_result(
+                'tf_static_check',
+                'FAIL',
+                'no static TF pairs checked',
+                'imu_link and lidar frame were both unavailable'
+            )
             self.shutdown()
             return
+
+        for pair in self.transform_pairs:
+            self.samples[pair] = {}
 
         for pair in self.transform_pairs:
             self.samples[pair] = []
@@ -176,8 +185,9 @@ class TFStaticCheck(Node):
         self.get_logger().info('========== ANALYSIS ==========')
 
         overall_pass = True
+        notes_parts = []
+        stable_pairs = 0
 
-        # Tolerances
         translation_tol_m = 1e-4
         rotation_tol_deg = 0.05
 
@@ -188,6 +198,7 @@ class TFStaticCheck(Node):
             if len(tf_list) < 2:
                 self.get_logger().error(f'[FAIL] Not enough samples for {parent} -> {child}')
                 overall_pass = False
+                notes_parts.append(f'not enough samples for {parent}->{child}')
                 continue
 
             first = tf_list[0]
@@ -256,16 +267,41 @@ class TFStaticCheck(Node):
                 )
                 pair_pass = False
 
-            if not pair_pass:
+            if pair_pass:
+                stable_pairs += 1
+            else:
                 overall_pass = False
+                notes_parts.append(
+                    f'{parent}->{child} drift '
+                    f'(trans={max_translation_drift:.6f} m, rot={max_rotation_drift_deg:.6f} deg)'
+                )
 
             self.get_logger().info('')
 
         self.get_logger().info('========== SUMMARY ==========')
+
+        total_pairs = len(self.transform_pairs)
+        measurement = f'{stable_pairs}/{total_pairs} static transforms stable'
+
         if overall_pass:
             self.get_logger().info('[PASS] Static TF transforms are stable')
+            status = 'PASS'
         else:
             self.get_logger().error('[FAIL] Static TF validation failed')
+            status = 'FAIL'
+
+        if not notes_parts:
+            checked_names = [f'{p}->{c}' for p, c in self.transform_pairs]
+            notes = 'stable transforms: ' + ', '.join(checked_names)
+        else:
+            notes = '; '.join(notes_parts)
+
+        append_result(
+            'tf_static_check',
+            status,
+            measurement,
+            notes
+        )
 
         self.shutdown()
 

@@ -3,7 +3,7 @@
 """
 tf_tree_check.py
 
-TurtleBot3-specific TF tree validation.
+Validate TurtleBot3 TF tree structure.
 
 Checks:
 - Required core frames exist
@@ -11,6 +11,8 @@ Checks:
 - Accept either 'laser' or 'base_scan' for lidar
 - Optional 'map' frame if SLAM/localization is running
 - Required transform relationships are resolvable
+
+Writes one summary row to the shared TF validation CSV.
 """
 
 from typing import List, Tuple, Optional
@@ -20,6 +22,8 @@ from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
+from tb3_tf_validation.result_utils import append_result
+
 
 class TFTreeCheck(Node):
     def __init__(self) -> None:
@@ -28,31 +32,27 @@ class TFTreeCheck(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Core TB3 frames that should almost always exist
         self.required_frames: List[str] = [
             'odom',
             'base_footprint',
             'base_link',
         ]
 
-        # Expected but may vary slightly depending on setup
         self.expected_frames: List[str] = [
             'imu_link',
         ]
 
-        # Optional depending on SLAM/localization
         self.optional_frames: List[str] = [
             'map',
         ]
 
-        # Accept either laser or base_scan for lidar frame
         self.lidar_frame_candidates: List[str] = [
             'laser',
             'base_scan',
         ]
 
-        self.timer = self.create_timer(2.0, self.run_check)
         self.has_run = False
+        self.timer = self.create_timer(2.0, self.run_check)
 
     def get_all_frames_yaml(self) -> str:
         try:
@@ -82,25 +82,18 @@ class TFTreeCheck(Node):
             )
             return False
 
-    def print_header(self, title: str) -> None:
-        self.get_logger().info('')
-        self.get_logger().info('=' * 42)
-        self.get_logger().info(title)
-        self.get_logger().info('=' * 42)
-
     def run_check(self) -> None:
         if self.has_run:
             return
         self.has_run = True
 
-        self.print_header('TB3 TF TREE CHECK')
+        self.get_logger().info('========== TF TREE CHECK ==========')
 
         missing_required_frames: List[str] = []
         missing_expected_frames: List[str] = []
         failed_required_links: List[Tuple[str, str]] = []
         warning_links: List[Tuple[str, str]] = []
 
-        # -------- Frame existence --------
         self.get_logger().info('Checking required frames...')
         for frame in self.required_frames:
             if self.frame_exists(frame):
@@ -134,10 +127,7 @@ class TFTreeCheck(Node):
             else:
                 self.get_logger().info(f'[INFO] Optional frame not present: {frame}')
 
-        # -------- Transform connectivity --------
-        self.get_logger().info('')
         self.get_logger().info('Checking required transform paths...')
-
         required_links: List[Tuple[str, str]] = [
             ('odom', 'base_footprint'),
             ('base_footprint', 'base_link'),
@@ -150,7 +140,6 @@ class TFTreeCheck(Node):
                 self.get_logger().error(f'[FAIL] Transform path missing: {parent} -> {child}')
                 failed_required_links.append((parent, child))
 
-        # IMU link check
         if self.frame_exists('imu_link'):
             if self.transform_exists('base_link', 'imu_link'):
                 self.get_logger().info('[PASS] Transform path found: base_link -> imu_link')
@@ -158,7 +147,6 @@ class TFTreeCheck(Node):
                 self.get_logger().warn('[WARN] Transform path missing: base_link -> imu_link')
                 warning_links.append(('base_link', 'imu_link'))
 
-        # Lidar link check
         if lidar_frame is not None:
             if self.transform_exists('base_link', lidar_frame):
                 self.get_logger().info(f'[PASS] Transform path found: base_link -> {lidar_frame}')
@@ -166,7 +154,6 @@ class TFTreeCheck(Node):
                 self.get_logger().warn(f'[WARN] Transform path missing: base_link -> {lidar_frame}')
                 warning_links.append(('base_link', lidar_frame))
 
-        # Optional map link
         if self.frame_exists('map'):
             if self.transform_exists('map', 'odom'):
                 self.get_logger().info('[PASS] Transform path found: map -> odom')
@@ -176,42 +163,61 @@ class TFTreeCheck(Node):
         else:
             self.get_logger().info('[INFO] Skipping map -> odom check because map frame is not present')
 
-        # -------- Summary --------
-        self.print_header('SUMMARY')
+        self.get_logger().info('========== SUMMARY ==========')
 
-        if not missing_required_frames and not failed_required_links:
+        overall_pass = not missing_required_frames and not failed_required_links
+
+        if overall_pass:
             self.get_logger().info('[PASS] Core TB3 TF tree is valid')
+            status = 'PASS'
+            measurement = 'core TF tree valid'
         else:
             self.get_logger().error('[FAIL] Core TB3 TF tree validation failed')
+            status = 'FAIL'
+            measurement = 'core TF tree invalid'
+
+        notes_parts = []
 
         if missing_required_frames:
-            self.get_logger().error('Missing required frames:')
-            for frame in missing_required_frames:
-                self.get_logger().error(f'  - {frame}')
-
-        if failed_required_links:
-            self.get_logger().error('Missing required transform paths:')
-            for parent, child in failed_required_links:
-                self.get_logger().error(f'  - {parent} -> {child}')
-
-        if missing_expected_frames:
-            self.get_logger().warn('Missing expected frames:')
-            for frame in missing_expected_frames:
-                self.get_logger().warn(f'  - {frame}')
-
-        if warning_links:
-            self.get_logger().warn('Non-fatal transform warnings:')
-            for parent, child in warning_links:
-                self.get_logger().warn(f'  - {parent} -> {child}')
-
-        if lidar_frame is None:
-            self.get_logger().warn(
-                'No lidar frame detected. Check whether your TB3 is publishing laser/base_scan.'
+            notes_parts.append(
+                'missing required frames: ' + ', '.join(missing_required_frames)
             )
 
-        self.get_logger().info('=' * 42)
-        self.get_logger().info('TF tree check complete. Shutting down.')
+        if failed_required_links:
+            notes_parts.append(
+                'missing required links: ' + ', '.join(
+                    [f'{p}->{c}' for p, c in failed_required_links]
+                )
+            )
 
+        if missing_expected_frames:
+            notes_parts.append(
+                'missing expected frames: ' + ', '.join(missing_expected_frames)
+            )
+
+        if warning_links:
+            notes_parts.append(
+                'warning links: ' + ', '.join(
+                    [f'{p}->{c}' for p, c in warning_links]
+                )
+            )
+
+        if lidar_frame is None:
+            notes_parts.append('no lidar frame found')
+
+        if not notes_parts:
+            notes_parts.append('all core TF checks passed')
+
+        notes = '; '.join(notes_parts)
+
+        append_result(
+            'tf_tree_check',
+            status,
+            measurement,
+            notes
+        )
+
+        self.get_logger().info('TF tree check complete. Shutting down.')
         self.destroy_timer(self.timer)
         self.destroy_node()
         rclpy.shutdown()
