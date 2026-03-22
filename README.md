@@ -179,7 +179,7 @@ Before debugging SLAM, AMCL, Cartographer, or Nav2, it helps to verify:
 
 ```bash
 cd ~/your_ros2_ws/src
-git clone <your_repo>
+git clone https://github.com/johnnyjvang/tb3_tf_validation.git
 ```
 
 ```bash
