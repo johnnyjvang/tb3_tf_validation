@@ -24,6 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'tf_tree_check = tb3_tf_validation.tf_tree_check:main',
+            'tf_static_check = tb3_tf_validation.tf_static_check:main',
+            'tf_dynamic_check = tb3_tf_validation.tf_dynamic_check:main',
         ],
     },
 )
